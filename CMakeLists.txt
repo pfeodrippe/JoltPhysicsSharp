@@ -133,8 +133,8 @@ endif()
 
 FetchContent_Declare(
         JoltPhysics
-        GIT_REPOSITORY "https://github.com/jrouwe/JoltPhysics"
-        GIT_TAG "fe9dbbbe1b873dbbc856320750692f185081e14d"
+        GIT_REPOSITORY "https://github.com/pfeodrippe/JoltPhysics"
+        GIT_TAG "9578adf25dc2334d67ed89c85c6f263596475efd"
 		SOURCE_SUBDIR "Build"
 )
 FetchContent_MakeAvailable(JoltPhysics)
@@ -278,10 +278,6 @@ else()
 endif()
 
 add_subdirectory(src/joltc)
-
-if (JPH_SAMPLES)
-	add_subdirectory(src/samples/HelloWorldNative)
-endif ()
 
 if (CMAKE_GENERATOR_PLATFORM)
     message(STATUS "CMAKE_GENERATOR_PLATFORM: ${CMAKE_GENERATOR_PLATFORM}")
