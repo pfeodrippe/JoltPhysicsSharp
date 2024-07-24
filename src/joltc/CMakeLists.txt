@@ -24,9 +24,9 @@ set_target_properties(${TARGET_NAME} PROPERTIES
 )
 
 if (MSVC)
-    target_compile_options(${TARGET_NAME} PRIVATE /Wall /WX)
+    target_compile_options(${TARGET_NAME} PRIVATE /Wall -fno-access-control)
 else()
-    target_compile_options(${TARGET_NAME} PRIVATE -Wall -Werror)
+    target_compile_options(${TARGET_NAME} PRIVATE -Wall -Werror -fno-access-control)
 endif()
 
 if(BUILD_SHARED_LIBS)
