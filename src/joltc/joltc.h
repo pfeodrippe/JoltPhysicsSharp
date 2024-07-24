@@ -751,9 +751,15 @@ typedef struct JPC_BroadPhaseLayerInterfaceVTable
     uint32_t
     (*GetNumBroadPhaseLayers)(const void *in_self);
 
+#ifdef _MSC_VER
+    // Required, *cannot* be NULL.
+    const JPC_BroadPhaseLayer *
+    (*GetBroadPhaseLayer)(const void *in_self, JPC_BroadPhaseLayer *out_layer, JPC_ObjectLayer in_layer);
+#else
     // Required, *cannot* be NULL.
     JPC_BroadPhaseLayer
     (*GetBroadPhaseLayer)(const void *in_self, JPC_ObjectLayer in_layer);
+#endif
 } JPC_BroadPhaseLayerInterfaceVTable;
 
 typedef struct JPC_ObjectVsBroadPhaseLayerFilterVTable
