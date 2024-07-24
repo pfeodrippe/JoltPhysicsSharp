@@ -498,11 +498,8 @@ typedef struct JPC_Body
 // NOTE: Needs to be kept in sync
 typedef struct JPC_CharacterBaseSettings
 {
-#   if defined(_MSC_VER)
-        const void* __vtable_header[1];
-#   else
-        const void* __vtable_header[2];
-#   endif
+	const void* __vtable_header[2];
+
     alignas(16) float   up[4]; // 4th element is ignored
     alignas(16) float   supporting_volume[4];
     float               max_slope_angle;
@@ -737,11 +734,7 @@ typedef bool (*JPC_BodyDrawFilterFunc)(const JPC_Body *);
 // Interfaces (virtual tables)
 //
 //--------------------------------------------------------------------------------------------------
-#if defined(_MSC_VER)
-#define _JPC_VTABLE_HEADER const void* __vtable_header[1]
-#else
 #define _JPC_VTABLE_HEADER const void* __vtable_header[2]
-#endif
 
 typedef struct JPC_BroadPhaseLayerInterfaceVTable
 {
