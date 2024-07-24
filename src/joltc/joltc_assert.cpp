@@ -1,19 +1,21 @@
-// Copyright (c) Amer Koleci and Contributors.
-// Licensed under the MIT License (MIT). See LICENSE in the repository root for more information.
-
+//--------------------------------------------------------------------------------------------------
 #include "joltc.h"
+#include <assert.h>
 
 #ifdef _MSC_VER
-__pragma(warning(push, 0))
+#define _ALLOW_KEYWORD_MACROS
 #endif
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
+#include <Jolt/Core/Memory.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
@@ -22,159 +24,291 @@ __pragma(warning(push, 0))
 #include <Jolt/Physics/Collision/Shape/TaperedCapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
-#include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
-#include <Jolt/Physics/Body/AllowedDOFs.h>
-#include <Jolt/Physics/Constraints/SixDOFConstraint.h>
-#include <Jolt/Physics/Character/CharacterBase.h>
+#include <Jolt/Physics/Body/BodyLock.h>
 
-#ifdef _MSC_VER
-__pragma(warning(pop))
+#if defined(_MSC_VER) && defined(_DEBUG)
+#include <Jolt/Physics/PhysicsLock.cpp>
 #endif
 
+JPH_SUPPRESS_WARNINGS
+//--------------------------------------------------------------------------------------------------
+JPC_API JPC_Body **
+JPC_PhysicsSystem_GetBodiesUnsafe(JPC_PhysicsSystem *in_physics_system)
+{
+    assert(in_physics_system != nullptr);
+    auto physics_system = reinterpret_cast<JPH::PhysicsSystem *>(in_physics_system);
+    return reinterpret_cast<JPC_Body **>(physics_system->mBodyManager.mBodies.data());
+}
+//--------------------------------------------------------------------------------------------------
+JPC_API void
+JPC_PhysicsSystem_GetBodies(JPC_PhysicsSystem *in_physics_system, JPC_Body ** out_bodies)
+{
+    assert(in_physics_system != nullptr && out_bodies != nullptr);
+    auto physics_system = reinterpret_cast<JPH::PhysicsSystem *>(in_physics_system);
+    //auto bodies = reinterpret_cast<JPC_Body **>(physics_system->mBodyManager.mBodies.data());
+
+    for (JPH::Body *b : physics_system->mBodyManager.mBodies)
+        if (JPH::BodyManager::sIsValidBodyPointer(b))
+        {
+            *out_bodies = reinterpret_cast<JPC_Body *>(b);
+            out_bodies += 1;
+        }
+}
+//--------------------------------------------------------------------------------------------------
+JPC_API void
+JPC_PhysicsSystem_GetBodyIDs(const JPC_PhysicsSystem *in_physics_system,
+                             uint32_t in_max_body_ids,
+                             uint32_t *out_num_body_ids,
+                             JPC_BodyID *out_body_ids)
+{
+    assert(in_physics_system != nullptr && out_body_ids != nullptr);
+    assert(in_max_body_ids > 0);
+
+    auto physics_system = reinterpret_cast<const JPH::PhysicsSystem *>(in_physics_system);
+
+    JPH::UniqueLock lock(
+        physics_system->mBodyManager.mBodiesMutex
+        JPH_IF_ENABLE_ASSERTS(, &physics_system->mBodyManager, JPH::EPhysicsLockTypes::BodiesList));
+
+    if (out_num_body_ids) *out_num_body_ids = 0;
+
+    for (const JPH::Body *b : physics_system->mBodyManager.mBodies)
+        if (JPH::BodyManager::sIsValidBodyPointer(b))
+        {
+            *out_body_ids = b->GetID().GetIndexAndSequenceNumber();
+            out_body_ids += 1;
+            if (out_num_body_ids) *out_num_body_ids += 1;
+            in_max_body_ids -= 1;
+            if (in_max_body_ids == 0)
+                break;
+        }
+}
+//--------------------------------------------------------------------------------------------------
+JPC_API void
+JPC_PhysicsSystem_GetActiveBodyIDs(const JPC_PhysicsSystem *in_physics_system,
+                                   uint32_t in_max_body_ids,
+                                   uint32_t *out_num_body_ids,
+                                   JPC_BodyID *out_body_ids)
+{
+    assert(in_physics_system != nullptr && out_body_ids != nullptr);
+    assert(in_max_body_ids > 0);
+
+    auto physics_system = reinterpret_cast<const JPH::PhysicsSystem *>(in_physics_system);
+
+    JPH::UniqueLock lock(
+        physics_system->mBodyManager.mBodiesMutex
+        JPH_IF_ENABLE_ASSERTS(, &physics_system->mBodyManager, JPH::EPhysicsLockTypes::BodiesList));
+
+    if (out_num_body_ids) *out_num_body_ids = 0;
+
+    // 0 means rigid body type
+    for (uint32_t i = 0; i < physics_system->mBodyManager.mNumActiveBodies[0]; ++i)
+    {
+        const JPH::BodyID body_id = physics_system->mBodyManager.mActiveBodies[0][i];
+        *out_body_ids = body_id.GetIndexAndSequenceNumber();
+        out_body_ids += 1;
+        if (out_num_body_ids) *out_num_body_ids += 1;
+        in_max_body_ids -= 1;
+        if (in_max_body_ids == 0)
+            break;
+    }
+}
+//--------------------------------------------------------------------------------------------------
+static_assert(JPC_COLLISION_GROUP_INVALID_GROUP     == JPH::CollisionGroup::cInvalidGroup);
+static_assert(JPC_COLLISION_GROUP_INVALID_SUB_GROUP == JPH::CollisionGroup::cInvalidSubGroup);
+static_assert(JPC_BODY_ID_INVALID                   == JPH::BodyID::cInvalidBodyID);
+static_assert(JPC_BODY_ID_INDEX_BITS                == JPH::BodyID::cMaxBodyIndex);
+static_assert(_JPC_IS_FREED_BODY_BIT                == JPH::BodyManager::cIsFreedBody);
+static_assert(JPC_SUB_SHAPE_ID_EMPTY                == JPH::SubShapeID::cEmpty);
+
+static_assert((JPC_BODY_ID_SEQUENCE_BITS >> JPC_BODY_ID_SEQUENCE_SHIFT) == JPH::BodyID::cMaxSequenceNumber);
+//--------------------------------------------------------------------------------------------------
 #define ENSURE_SIZE_ALIGN(type0, type1) \
     static_assert(sizeof(type0) == sizeof(type1)); \
-    static_assert(alignof(type0) == alignof(type1))
+    static_assert(alignof(type0) == alignof(type1));
 
-static_assert(sizeof(JPH::ObjectLayer) == sizeof(JPH_ObjectLayer));
-static_assert(sizeof(JPH::BroadPhaseLayer) == sizeof(JPH_BroadPhaseLayer));
-static_assert(sizeof(JPH::BodyID) == sizeof(JPH_BodyID));
-static_assert(sizeof(JPH::SubShapeID) == sizeof(JPH_SubShapeID));
+ENSURE_SIZE_ALIGN(JPH::BodyID,                  JPC_BodyID)
+ENSURE_SIZE_ALIGN(JPH::SubShapeID,              JPC_SubShapeID)
+ENSURE_SIZE_ALIGN(JPH::SubShapeIDCreator,       JPC_SubShapeIDCreator)
+ENSURE_SIZE_ALIGN(JPH::EShapeType,              JPC_ShapeType)
+ENSURE_SIZE_ALIGN(JPH::EShapeSubType,           JPC_ShapeSubType)
+ENSURE_SIZE_ALIGN(JPH::EMotionType,             JPC_MotionType)
+ENSURE_SIZE_ALIGN(JPH::EMotionQuality,          JPC_MotionQuality)
+ENSURE_SIZE_ALIGN(JPH::EBackFaceMode,           JPC_BackFaceMode)
+ENSURE_SIZE_ALIGN(JPH::EOverrideMassProperties, JPC_OverrideMassProperties)
+ENSURE_SIZE_ALIGN(JPH::EActivation,             JPC_Activation)
+ENSURE_SIZE_ALIGN(JPH::ValidateResult,          JPC_ValidateResult)
+ENSURE_SIZE_ALIGN(JPH::BroadPhaseLayer,         JPC_BroadPhaseLayer)
+ENSURE_SIZE_ALIGN(JPH::ObjectLayer,             JPC_ObjectLayer)
 
-// EPhysicsUpdateError
-static_assert(sizeof(JPH_PhysicsUpdateError) == sizeof(JPH::EPhysicsUpdateError));
-static_assert(JPH_PhysicsUpdateError_None == (int)JPH::EPhysicsUpdateError::None);
-static_assert(JPH_PhysicsUpdateError_ManifoldCacheFull == (int)JPH::EPhysicsUpdateError::ManifoldCacheFull);
-static_assert(JPH_PhysicsUpdateError_BodyPairCacheFull == (int)JPH::EPhysicsUpdateError::BodyPairCacheFull);
-static_assert(JPH_PhysicsUpdateError_ContactConstraintsFull == (int)JPH::EPhysicsUpdateError::ContactConstraintsFull);
+ENSURE_SIZE_ALIGN(JPH::CollisionGroup::GroupID,    JPC_CollisionGroupID)
+ENSURE_SIZE_ALIGN(JPH::CollisionGroup::SubGroupID, JPC_CollisionSubGroupID)
 
-// EBodyType
-static_assert(JPH_BodyType_Rigid == (int)JPH::EBodyType::RigidBody);
-static_assert(JPH_BodyType_Soft == (int)JPH::EBodyType::SoftBody);
+ENSURE_SIZE_ALIGN(JPH::MassProperties,       JPC_MassProperties)
+ENSURE_SIZE_ALIGN(JPH::MotionProperties,     JPC_MotionProperties)
+ENSURE_SIZE_ALIGN(JPH::CollisionGroup,       JPC_CollisionGroup)
+ENSURE_SIZE_ALIGN(JPH::BodyCreationSettings, JPC_BodyCreationSettings)
+ENSURE_SIZE_ALIGN(JPH::ContactManifold,      JPC_ContactManifold)
+ENSURE_SIZE_ALIGN(JPH::ContactSettings,      JPC_ContactSettings)
+ENSURE_SIZE_ALIGN(JPH::SubShapeIDPair,       JPC_SubShapeIDPair)
+ENSURE_SIZE_ALIGN(JPH::CollideShapeResult,   JPC_CollideShapeResult)
+ENSURE_SIZE_ALIGN(JPH::TransformedShape,     JPC_TransformedShape)
+ENSURE_SIZE_ALIGN(JPH::Body,                 JPC_Body)
 
-// EMotionType
-static_assert(JPH_MotionType_Static == (int)JPH::EMotionType::Static);
-static_assert(JPH_MotionType_Kinematic == (int)JPH::EMotionType::Kinematic);
-static_assert(JPH_MotionType_Dynamic == (int)JPH::EMotionType::Dynamic);
+ENSURE_SIZE_ALIGN(JPH::BodyLockRead,  JPC_BodyLockRead)
+ENSURE_SIZE_ALIGN(JPH::BodyLockWrite, JPC_BodyLockWrite)
 
-// EActivation
-static_assert(sizeof(JPH::EActivation) == sizeof(JPH_Activation));
-static_assert(JPH_Activation_Activate == (int)JPH::EActivation::Activate);
-static_assert(JPH_Activation_DontActivate == (int)JPH::EActivation::DontActivate);
+ENSURE_SIZE_ALIGN(JPH::RRayCast, JPC_RRayCast)
+ENSURE_SIZE_ALIGN(JPH::RayCastResult, JPC_RayCastResult)
+ENSURE_SIZE_ALIGN(JPH::RayCastSettings, JPC_RayCastSettings)
+//--------------------------------------------------------------------------------------------------
+#define ENSURE_ENUM_EQ(c_const, cpp_enum) static_assert(c_const == static_cast<int>(cpp_enum))
 
-// EActivation
-static_assert(sizeof(JPH::ValidateResult) == sizeof(JPH_ValidateResult));
-static_assert(JPH_ValidateResult_AcceptAllContactsForThisBodyPair == (int)JPH::ValidateResult::AcceptAllContactsForThisBodyPair);
-static_assert(JPH_ValidateResult_AcceptContact == (int)JPH::ValidateResult::AcceptContact);
-static_assert(JPH_ValidateResult_RejectContact == (int)JPH::ValidateResult::RejectContact);
-static_assert(JPH_ValidateResult_RejectAllContactsForThisBodyPair == (int)JPH::ValidateResult::RejectAllContactsForThisBodyPair);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_CONVEX,       JPH::EShapeType::Convex);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_COMPOUND,     JPH::EShapeType::Compound);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_DECORATED,    JPH::EShapeType::Decorated);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_MESH,         JPH::EShapeType::Mesh);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_HEIGHT_FIELD, JPH::EShapeType::HeightField);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_USER1,        JPH::EShapeType::User1);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_USER2,        JPH::EShapeType::User2);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_USER3,        JPH::EShapeType::User3);
+ENSURE_ENUM_EQ(JPC_SHAPE_TYPE_USER4,        JPH::EShapeType::User4);
 
-// EShapeType
-static_assert(JPH_ShapeType_Convex == (int)JPH::EShapeType::Convex);
-static_assert(JPH_ShapeType_Compound == (int)JPH::EShapeType::Compound);
-static_assert(JPH_ShapeType_Decorated == (int)JPH::EShapeType::Decorated);
-static_assert(JPH_ShapeType_Mesh == (int)JPH::EShapeType::Mesh);
-static_assert(JPH_ShapeType_HeightField == (int)JPH::EShapeType::HeightField);
-static_assert(JPH_ShapeType_SoftBody == (int)JPH::EShapeType::SoftBody);
-static_assert(JPH_ShapeType_User1 == (int)JPH::EShapeType::User1);
-static_assert(JPH_ShapeType_User2 == (int)JPH::EShapeType::User2);
-static_assert(JPH_ShapeType_User3 == (int)JPH::EShapeType::User3);
-static_assert(JPH_ShapeType_User4 == (int)JPH::EShapeType::User4);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_SPHERE,                JPH::EShapeSubType::Sphere);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_BOX,                   JPH::EShapeSubType::Box);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_TRIANGLE,              JPH::EShapeSubType::Triangle);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_CAPSULE,               JPH::EShapeSubType::Capsule);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_TAPERED_CAPSULE,       JPH::EShapeSubType::TaperedCapsule);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_CYLINDER,              JPH::EShapeSubType::Cylinder);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_CONVEX_HULL,           JPH::EShapeSubType::ConvexHull);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_STATIC_COMPOUND,       JPH::EShapeSubType::StaticCompound);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_MUTABLE_COMPOUND,      JPH::EShapeSubType::MutableCompound);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_ROTATED_TRANSLATED,    JPH::EShapeSubType::RotatedTranslated);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_SCALED,                JPH::EShapeSubType::Scaled);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_OFFSET_CENTER_OF_MASS, JPH::EShapeSubType::OffsetCenterOfMass);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_MESH,                  JPH::EShapeSubType::Mesh);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_HEIGHT_FIELD,          JPH::EShapeSubType::HeightField);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER1,                 JPH::EShapeSubType::User1);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER2,                 JPH::EShapeSubType::User2);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER3,                 JPH::EShapeSubType::User3);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER4,                 JPH::EShapeSubType::User4);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER5,                 JPH::EShapeSubType::User5);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER6,                 JPH::EShapeSubType::User6);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER7,                 JPH::EShapeSubType::User7);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER8,                 JPH::EShapeSubType::User8);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX1,          JPH::EShapeSubType::UserConvex1);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX2,          JPH::EShapeSubType::UserConvex2);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX3,          JPH::EShapeSubType::UserConvex3);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX4,          JPH::EShapeSubType::UserConvex4);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX5,          JPH::EShapeSubType::UserConvex5);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX6,          JPH::EShapeSubType::UserConvex6);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX7,          JPH::EShapeSubType::UserConvex7);
+ENSURE_ENUM_EQ(JPC_SHAPE_SUB_TYPE_USER_CONVEX8,          JPH::EShapeSubType::UserConvex8);
 
-// EShapeSubType
-static_assert(JPH_ShapeSubType_Sphere == (int)JPH::EShapeSubType::Sphere);
-static_assert(JPH_ShapeSubType_Box == (int)JPH::EShapeSubType::Box);
-static_assert(JPH_ShapeSubType_Triangle == (int)JPH::EShapeSubType::Triangle);
-static_assert(JPH_ShapeSubType_Capsule == (int)JPH::EShapeSubType::Capsule);
-static_assert(JPH_ShapeSubType_TaperedCapsule == (int)JPH::EShapeSubType::TaperedCapsule);
-static_assert(JPH_ShapeSubType_Cylinder == (int)JPH::EShapeSubType::Cylinder);
-static_assert(JPH_ShapeSubType_ConvexHull == (int)JPH::EShapeSubType::ConvexHull);
-static_assert(JPH_ShapeSubType_StaticCompound == (int)JPH::EShapeSubType::StaticCompound);
-static_assert(JPH_ShapeSubType_MutableCompound == (int)JPH::EShapeSubType::MutableCompound);
-static_assert(JPH_ShapeSubType_RotatedTranslated == (int)JPH::EShapeSubType::RotatedTranslated);
-static_assert(JPH_ShapeSubType_Scaled == (int)JPH::EShapeSubType::Scaled);
-static_assert(JPH_ShapeSubType_OffsetCenterOfMass == (int)JPH::EShapeSubType::OffsetCenterOfMass);
-static_assert(JPH_ShapeSubType_Mesh == (int)JPH::EShapeSubType::Mesh);
-static_assert(JPH_ShapeSubType_HeightField == (int)JPH::EShapeSubType::HeightField);
-static_assert(JPH_ShapeSubType_SoftBody == (int)JPH::EShapeSubType::SoftBody);
+ENSURE_ENUM_EQ(JPC_MOTION_TYPE_STATIC,    JPH::EMotionType::Static);
+ENSURE_ENUM_EQ(JPC_MOTION_TYPE_KINEMATIC, JPH::EMotionType::Kinematic);
+ENSURE_ENUM_EQ(JPC_MOTION_TYPE_DYNAMIC,   JPH::EMotionType::Dynamic);
 
-// EConstraintType
-static_assert(JPH_ConstraintType_Constraint == (int)JPH::EConstraintType::Constraint);
-static_assert(JPH_ConstraintType_TwoBodyConstraint == (int)JPH::EConstraintType::TwoBodyConstraint);
+ENSURE_ENUM_EQ(JPC_MOTION_QUALITY_DISCRETE,    JPH::EMotionQuality::Discrete);
+ENSURE_ENUM_EQ(JPC_MOTION_QUALITY_LINEAR_CAST, JPH::EMotionQuality::LinearCast);
 
-// EConstraintSubType
-static_assert(JPH_ConstraintSubType_Fixed == (int)JPH::EConstraintSubType::Fixed);
-static_assert(JPH_ConstraintSubType_Point == (int)JPH::EConstraintSubType::Point);
-static_assert(JPH_ConstraintSubType_Hinge == (int)JPH::EConstraintSubType::Hinge);
-static_assert(JPH_ConstraintSubType_Slider == (int)JPH::EConstraintSubType::Slider);
-static_assert(JPH_ConstraintSubType_Distance == (int)JPH::EConstraintSubType::Distance);
-static_assert(JPH_ConstraintSubType_Cone == (int)JPH::EConstraintSubType::Cone);
-static_assert(JPH_ConstraintSubType_SwingTwist == (int)JPH::EConstraintSubType::SwingTwist);
-static_assert(JPH_ConstraintSubType_SixDOF == (int)JPH::EConstraintSubType::SixDOF);
-static_assert(JPH_ConstraintSubType_Path  == (int)JPH::EConstraintSubType::Path);
-static_assert(JPH_ConstraintSubType_Vehicle == (int)JPH::EConstraintSubType::Vehicle);
-static_assert(JPH_ConstraintSubType_RackAndPinion == (int)JPH::EConstraintSubType::RackAndPinion);
-static_assert(JPH_ConstraintSubType_Gear == (int)JPH::EConstraintSubType::Gear);
-static_assert(JPH_ConstraintSubType_Pulley == (int)JPH::EConstraintSubType::Pulley);
+ENSURE_ENUM_EQ(JPC_ACTIVATION_ACTIVATE,      JPH::EActivation::Activate);
+ENSURE_ENUM_EQ(JPC_ACTIVATION_DONT_ACTIVATE, JPH::EActivation::DontActivate);
 
-static_assert(JPH_ConstraintSubType_User1 == (int)JPH::EConstraintSubType::User1);
-static_assert(JPH_ConstraintSubType_User2 == (int)JPH::EConstraintSubType::User2);
-static_assert(JPH_ConstraintSubType_User3 == (int)JPH::EConstraintSubType::User3);
-static_assert(JPH_ConstraintSubType_User4 == (int)JPH::EConstraintSubType::User4);
+ENSURE_ENUM_EQ(JPC_OVERRIDE_MASS_PROPS_CALC_MASS_INERTIA,
+               JPH::EOverrideMassProperties::CalculateMassAndInertia);
+ENSURE_ENUM_EQ(JPC_OVERRIDE_MASS_PROPS_CALC_INERTIA,
+               JPH::EOverrideMassProperties::CalculateInertia);
+ENSURE_ENUM_EQ(JPC_OVERRIDE_MASS_PROPS_MASS_INERTIA_PROVIDED,
+               JPH::EOverrideMassProperties::MassAndInertiaProvided);
 
-// EActivation
-static_assert(sizeof(JPH::EConstraintSpace) == sizeof(JPH_ConstraintSpace));
-static_assert(JPH_ConstraintSpace_LocalToBodyCOM == (int)JPH::EConstraintSpace::LocalToBodyCOM);
-static_assert(JPH_ConstraintSpace_WorldSpace == (int)JPH::EConstraintSpace::WorldSpace);
+ENSURE_ENUM_EQ(JPC_VALIDATE_RESULT_ACCEPT_ALL_CONTACTS,
+               JPH::ValidateResult::AcceptAllContactsForThisBodyPair);
+ENSURE_ENUM_EQ(JPC_VALIDATE_RESULT_ACCEPT_CONTACT,
+               JPH::ValidateResult::AcceptContact);
+ENSURE_ENUM_EQ(JPC_VALIDATE_RESULT_REJECT_CONTACT,
+               JPH::ValidateResult::RejectContact);
+ENSURE_ENUM_EQ(JPC_VALIDATE_RESULT_REJECT_ALL_CONTACTS,
+               JPH::ValidateResult::RejectAllContactsForThisBodyPair);
 
-// EMotionQuality
-static_assert(JPH_MotionQuality_Discrete == (int)JPH::EMotionQuality::Discrete);
-static_assert(JPH_MotionQuality_LinearCast == (int)JPH::EMotionQuality::LinearCast);
+ENSURE_ENUM_EQ(JPC_MAX_PHYSICS_JOBS,     JPH::cMaxPhysicsJobs);
+ENSURE_ENUM_EQ(JPC_MAX_PHYSICS_BARRIERS, JPH::cMaxPhysicsBarriers);
 
-// JPH_AllowedDOFs
-static_assert(sizeof(JPH_AllowedDOFs) == sizeof(uint32_t));
-static_assert(JPH_AllowedDOFs_All == (int)JPH::EAllowedDOFs::All);
-static_assert(JPH_AllowedDOFs_TranslationX == (int)JPH::EAllowedDOFs::TranslationX);
-static_assert(JPH_AllowedDOFs_TranslationY == (int)JPH::EAllowedDOFs::TranslationY);
-static_assert(JPH_AllowedDOFs_TranslationZ == (int)JPH::EAllowedDOFs::TranslationZ);
-static_assert(JPH_AllowedDOFs_RotationX == (int)JPH::EAllowedDOFs::RotationX);
-static_assert(JPH_AllowedDOFs_RotationY == (int)JPH::EAllowedDOFs::RotationY);
-static_assert(JPH_AllowedDOFs_RotationZ == (int)JPH::EAllowedDOFs::RotationZ);
-static_assert(JPH_AllowedDOFs_Plane2D == (int)JPH::EAllowedDOFs::Plane2D);
+ENSURE_ENUM_EQ(JPC_BACK_FACE_IGNORE,  JPH::EBackFaceMode::IgnoreBackFaces);
+ENSURE_ENUM_EQ(JPC_BACK_FACE_COLLIDE, JPH::EBackFaceMode::CollideWithBackFaces);
+//--------------------------------------------------------------------------------------------------
+static_assert(
+    offsetof(JPH::BodyCreationSettings, mInertiaMultiplier) ==
+    offsetof(JPC_BodyCreationSettings, inertia_multiplier));
+static_assert(
+    offsetof(JPH::BodyCreationSettings, mIsSensor) == offsetof(JPC_BodyCreationSettings, is_sensor));
+static_assert(
+    offsetof(JPH::BodyCreationSettings, mAngularDamping) == offsetof(JPC_BodyCreationSettings, angular_damping));
 
-// JPH_MotorState
-static_assert(sizeof(JPH_MotorState) == sizeof(uint32_t));
-static_assert(JPH_MotorState_Off == (int)JPH::EMotorState::Off);
-static_assert(JPH_MotorState_Velocity == (int)JPH::EMotorState::Velocity);
-static_assert(JPH_MotorState_Position == (int)JPH::EMotorState::Position);
+static_assert(
+    offsetof(JPH::ContactManifold, mWorldSpaceNormal) == offsetof(JPC_ContactManifold, normal));
+static_assert(
+    offsetof(JPH::ContactManifold, mPenetrationDepth) == offsetof(JPC_ContactManifold, penetration_depth));
+static_assert(
+        offsetof(JPH::ContactManifold, mRelativeContactPointsOn1) ==
+        offsetof(JPC_ContactManifold, shape1_relative_contact));
+static_assert(
+    offsetof(JPH::ContactManifold, mRelativeContactPointsOn2) ==
+    offsetof(JPC_ContactManifold, shape2_relative_contact));
 
-// JPH_SixDOFConstraintAxis
-static_assert(sizeof(JPH_SixDOFConstraintAxis) == sizeof(uint32_t));
-static_assert(JPH_SixDOFConstraintAxis_TranslationX == (int)JPH::SixDOFConstraintSettings::EAxis::TranslationX);
-static_assert(JPH_SixDOFConstraintAxis_TranslationY == (int)JPH::SixDOFConstraintSettings::EAxis::TranslationY);
-static_assert(JPH_SixDOFConstraintAxis_TranslationZ == (int)JPH::SixDOFConstraintSettings::EAxis::TranslationZ);
-static_assert(JPH_SixDOFConstraintAxis_RotationX == (int)JPH::SixDOFConstraintSettings::EAxis::RotationX);
-static_assert(JPH_SixDOFConstraintAxis_RotationY == (int)JPH::SixDOFConstraintSettings::EAxis::RotationY);
-static_assert(JPH_SixDOFConstraintAxis_RotationZ == (int)JPH::SixDOFConstraintSettings::EAxis::RotationZ);
+static_assert(
+    offsetof(JPH::CollideShapeResult, mPenetrationDepth) == offsetof(JPC_CollideShapeResult, penetration_depth));
+static_assert(
+    offsetof(JPH::CollideShapeResult, mShape1Face) == offsetof(JPC_CollideShapeResult, shape1_face));
+static_assert(
+    offsetof(JPH::CollideShapeResult, mShape2Face) == offsetof(JPC_CollideShapeResult, shape2_face));
+static_assert(
+    offsetof(JPH::CollideShapeResult, mPenetrationDepth) == offsetof(JPC_CollideShapeResult, penetration_depth));
+static_assert(
+    offsetof(JPH::CollideShapeResult, mBodyID2) == offsetof(JPC_CollideShapeResult, body2_id));
 
-// JPH_SpringMode
-static_assert(sizeof(JPH_SpringMode) == sizeof(uint32_t));
-static_assert(JPH_SpringMode_FrequencyAndDamping == (int)JPH::ESpringMode::FrequencyAndDamping);
-static_assert(JPH_SpringMode_StiffnessAndDamping == (int)JPH::ESpringMode::StiffnessAndDamping);
+static_assert(offsetof(JPH::MotionProperties, mForce) == offsetof(JPC_MotionProperties, force));
+static_assert(offsetof(JPH::MotionProperties, mTorque) == offsetof(JPC_MotionProperties, torque));
+static_assert(offsetof(JPH::MotionProperties, mMotionQuality) == offsetof(JPC_MotionProperties, motion_quality));
+static_assert(offsetof(JPH::MotionProperties, mGravityFactor) == offsetof(JPC_MotionProperties, gravity_factor));
+#if JPC_ENABLE_ASSERTS == 1
+static_assert(
+    offsetof(JPH::MotionProperties, mCachedMotionType) == offsetof(JPC_MotionProperties, cached_motion_type));
+#endif
 
-// EGroundState
-static_assert(sizeof(JPH::CharacterBase::EGroundState) == sizeof(JPH_GroundState));
-static_assert(JPH_GroundState_OnGround == (int)JPH::CharacterBase::EGroundState::OnGround);
-static_assert(JPH_GroundState_OnSteepGround == (int)JPH::CharacterBase::EGroundState::OnSteepGround);
-static_assert(JPH_GroundState_NotSupported == (int)JPH::CharacterBase::EGroundState::NotSupported);
-static_assert(JPH_GroundState_InAir == (int)JPH::CharacterBase::EGroundState::InAir);
+static_assert(offsetof(JPH::MassProperties, mInertia) == offsetof(JPC_MassProperties, inertia));
 
-// EBackFaceMode
-static_assert(JPH_BackFaceMode_IgnoreBackFaces == (int)JPH::EBackFaceMode::IgnoreBackFaces);
-static_assert(JPH_BackFaceMode_CollideWithBackFaces == (int)JPH::EBackFaceMode::CollideWithBackFaces);
+static_assert(offsetof(JPH::SubShapeIDPair, mBody2ID) == offsetof(JPC_SubShapeIDPair, second));
 
-static_assert(sizeof(JPH::SubShapeIDPair) == sizeof(JPH_SubShapeIDPair));
-static_assert(alignof(JPH::SubShapeIDPair) == alignof(JPH_SubShapeIDPair));
+static_assert(offsetof(JPH::SubShapeIDCreator, mCurrentBit) == offsetof(JPC_SubShapeIDCreator, current_bit));
 
-//static_assert(offsetof(JPH::MassProperties, mMass) == offsetof(JPH_MassProperties, mass));
+static_assert(offsetof(JPH::CollisionGroup, mGroupID) == offsetof(JPC_CollisionGroup, group_id));
+
+static_assert(offsetof(JPH::Body, mFlags) == offsetof(JPC_Body, flags));
+static_assert(offsetof(JPH::Body, mMotionProperties) == offsetof(JPC_Body, motion_properties));
+static_assert(offsetof(JPH::Body, mObjectLayer) == offsetof(JPC_Body, object_layer));
+static_assert(offsetof(JPH::Body, mRotation) == offsetof(JPC_Body, rotation));
+static_assert(offsetof(JPH::Body, mID) == offsetof(JPC_Body, id));
+
+static_assert(offsetof(JPH::BodyLockRead, mBodyLockInterface) == offsetof(JPC_BodyLockRead, lock_interface));
+static_assert(offsetof(JPH::BodyLockRead, mBodyLockMutex) == offsetof(JPC_BodyLockRead, mutex));
+static_assert(offsetof(JPH::BodyLockRead, mBody) == offsetof(JPC_BodyLockRead, body));
+
+static_assert(offsetof(JPH::RayCastResult, mBodyID) == offsetof(JPC_RayCastResult, body_id));
+static_assert(offsetof(JPH::RayCastResult, mFraction) == offsetof(JPC_RayCastResult, fraction));
+static_assert(offsetof(JPH::RayCastResult, mSubShapeID2) == offsetof(JPC_RayCastResult, sub_shape_id));
+
+static_assert(offsetof(JPH::RayCastSettings, mBackFaceMode) == offsetof(JPC_RayCastSettings, back_face_mode));
+static_assert(offsetof(JPH::RayCastSettings, mTreatConvexAsSolid) ==
+    offsetof(JPC_RayCastSettings, treat_convex_as_solid));
+
+static_assert(offsetof(JPH::RRayCast, mOrigin) == offsetof(JPC_RRayCast, origin));
+static_assert(offsetof(JPH::RRayCast, mDirection) == offsetof(JPC_RRayCast, direction));
+
+static_assert(sizeof(JPH::BodyID) == 4);
+static_assert(sizeof(JPH::SubShapeID) == 4);
+static_assert(sizeof(JPH::CollisionGroup::GroupID) == 4);
+static_assert(sizeof(JPH::CollisionGroup::SubGroupID) == 4);
+//--------------------------------------------------------------------------------------------------
